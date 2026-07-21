@@ -1,0 +1,79 @@
+version: "3.7"
+
+services:
+  app_proxy:
+    environment:
+      # `<app-id>_<service-name>_1` -- app id here is `ingle-hearth` (this
+      # store's mandatory app-id prefix, umbrel-app.yml's `id:`).
+      APP_HOST: ingle-hearth_web_1
+      APP_PORT: 3000
+
+  web:
+    # Pinned to the multi-arch (linux/amd64 + linux/arm64) manifest-list
+    # digest pushed by the Hearth repo's release workflow. Verify with:
+    #   docker buildx imagetools inspect ghcr.io/alexm223/hearth:0.1.0
+    image: ghcr.io/alexm223/hearth:0.1.0@sha256:7d6a475102c69b7e90300c85e950081de923b6dcc2c7c9db1a1edcdf24e903e4
+    restart: on-failure
+    stop_grace_period: 1m
+    init: true
+    user: "1000:1000"
+    ports:
+      # Raw host port for hardware-wallet signing -- needs an HTTPS secure
+      # context that app_proxy's plain HTTP cannot provide.
+      # host 4489 -> container 3443.
+      - "4489:3443"
+      # Raw host ports for the solo-mining Stratum V1 listeners -- app_proxy
+      # is HTTP-only and can't proxy raw TCP. Only reachable once mining is
+      # enabled AND bind is set to lan/all; harmless (nothing listening)
+      # until then.
+      #
+      # Host side is 3343/3345 rather than the container-internal 3333/3334
+      # to avoid clashing with other apps' published ports (3344 in
+      # particular is already taken by another app in the official store).
+      # A miner pointed at this box connects to host 3343 (standard) or
+      # 3345 (ASIC-floor); the container side stays the real listener ports.
+      - "3343:3333" # standard (host 3343 -> container 3333)
+      - "3345:3334" # ASIC-floor (host 3345 -> container 3334)
+    volumes:
+      - ${APP_DATA_DIR}/data:/data
+    environment:
+      # HTTP port app_proxy connects to.
+      PORT: 3000
+      # Gates the Umbrel auto-connect probe -- without this the probe never
+      # fires and the app stays on manual-config-only. Never set on
+      # non-Umbrel deployments.
+      HEARTH_PLATFORM: umbrel
+      # First-run admin bootstrap; forces a credential reset on first login.
+      HEARTH_ADMIN_PASSWORD: ${APP_PASSWORD}
+      # Keeps the session cookie non-Secure over plain-HTTP Umbrel and anchors
+      # notification deep links. Port MUST match the manifest `port`.
+      HEARTH_ORIGIN: http://${DEVICE_DOMAIN_NAME}:3252
+      # Advertised HTTPS port, since the published host port (4489) differs from 3443.
+      HEARTH_HTTPS_EXTERNAL_PORT: 4489
+      # Advertised Stratum ports: the mining dashboard's connection card must
+      # tell a miner to dial the PUBLISHED host port (3343/3345), not the
+      # container-internal listening port (3333/3334).
+      HEARTH_MINING_STRATUM_EXTERNAL_PORT: 3343
+      HEARTH_MINING_ASIC_EXTERNAL_PORT: 3345
+      # Better client IPs for rate-limiting/audit behind the proxy; safely ignored if absent.
+      ADDRESS_HEADER: x-forwarded-for
+      # --- auto-wired Core RPC, never a hand-typed connection string ---
+      # `dependencies: [bitcoin]` in umbrel-app.yml makes umbrelOS inject these
+      # from the Bitcoin app's own exports.
+      HEARTH_CORE_RPC_HOST: ${APP_BITCOIN_NODE_IP}
+      HEARTH_CORE_RPC_PORT: ${APP_BITCOIN_RPC_PORT}
+      HEARTH_CORE_RPC_USER: ${APP_BITCOIN_RPC_USER}
+      HEARTH_CORE_RPC_PASS: ${APP_BITCOIN_RPC_PASS}
+      # --- auto-wired Electrum rail, same treatment ---
+      # `dependencies: [bitcoin, electrs]` in umbrel-app.yml lets the user pick
+      # either Umbrel's own `electrs` app or `fulcrum` (which declares
+      # `implements: [electrs]` and exports the identical APP_ELECTRS_NODE_IP /
+      # APP_ELECTRS_NODE_PORT contract) as the provider; either way umbrelOS
+      # guarantees install order and injects the real address here.
+      HEARTH_ELECTRUM_HOST: ${APP_ELECTRS_NODE_IP}
+      HEARTH_ELECTRUM_PORT: ${APP_ELECTRS_NODE_PORT}
+      # --- REQUIRED behind app_proxy ---
+      # Without these, adapter-node assumes https and SvelteKit's CSRF origin
+      # check rejects every form POST; app_proxy sets both by default.
+      PROTOCOL_HEADER: x-forwarded-proto
+      HOST_HEADER: x-forwarded-host
